@@ -1,6 +1,7 @@
 import uuid
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
+from db import connection
 
 
 class TaskCreated(BaseModel):
@@ -34,6 +35,21 @@ TASK_NOT_FOUND_EXCEPTION = HTTPException(
 @app.get("/")
 def root():
     return {"ok": True, "message": "Hello World"}
+
+
+@app.get("/db-health")
+def validate_connection():
+    cursor = connection.cursor()
+    cursor.execute("SELECT 1")
+    result = cursor.fetchone()
+
+    if result is not None:
+        return {"ok": True, "message": "Database is healthy"}
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Database is not healthy",
+    )
 
 
 @app.get("/task")
