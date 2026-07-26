@@ -1,7 +1,18 @@
 import uuid
-from fastapi import FastAPI, HTTPException, status
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel
-from db import connection
+from sqlmodel import Session, SQLModel, func, select
+
+import models
+from db import engine, get_session
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    SQLModel.metadata.create_all(bind=engine)
+    yield
 
 
 class TaskCreated(BaseModel):
@@ -17,7 +28,8 @@ class TaskUpdate(BaseModel):
     task: str
 
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
+
 
 tasks = []
 
@@ -37,24 +49,14 @@ def root():
     return {"ok": True, "message": "Hello World"}
 
 
-@app.get("/db-health")
-def validate_connection():
-    cursor = connection.cursor()
-    cursor.execute("SELECT 1")
-    result = cursor.fetchone()
-
-    if result is not None:
-        return {"ok": True, "message": "Database is healthy"}
-
-    raise HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="Database is not healthy",
-    )
-
-
 @app.get("/task")
-def get_tasks():
-    return {"ok": True, "count": len(tasks), "results": tasks}
+def get_tasks(limit: int = 50, offset: int = 0, session: Session = Depends(get_session)):
+    tasks_query = session.exec(select(models.Task).offset(offset).limit(limit)).all()
+    tasks = [models.TaskPublic.model_validate(task) for task in tasks_query]
+    count = session.exec(select(func.count()).select_from(models.Task)).one()
+    has_more = count > offset + len(tasks)
+
+    return {"ok": True, "count": count, "results": tasks, "has_more": has_more}
 
 
 @app.get("/task/{task_id}")
