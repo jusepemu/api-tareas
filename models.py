@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from uuid import uuid4
 
+from sqlalchemy import Column
+from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, SQLModel
 
 
@@ -16,7 +18,18 @@ class TaskBase(SQLModel):
     title: str = Field(max_length=255)
     description: str | None = Field(default=None, max_length=255)
     completed: bool = False
-    status: StatusEnum = Field(default=StatusEnum.TODO)
+    status: StatusEnum = Field(
+        default=StatusEnum.TODO,
+        sa_column=Column(
+            SAEnum(
+                StatusEnum,
+                values_callable=lambda x: [e.value for e in x],
+                name="statusenum",
+            ),
+            default=StatusEnum.TODO,
+            nullable=False,
+        ),
+    )
     start_date: datetime | None = None
     end_date: datetime | None = None
 
