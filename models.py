@@ -22,8 +22,8 @@ class TaskBase(SQLModel):
 
 
 class Task(TaskBase, table=True):
-    id: str | None = Field(default=lambda: str(uuid4()), primary_key=True, max_length=36)
-    created_at: datetime | None = Field(default=lambda: datetime.now(UTC))
+    id: str | None = Field(default_factory=lambda: str(uuid4()), primary_key=True, max_length=36)
+    created_at: datetime | None = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class TaskCreate(TaskBase):

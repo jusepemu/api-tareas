@@ -1,8 +1,7 @@
-import uuid
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from pydantic import BaseModel
 from sqlmodel import Session, SQLModel, func, select
 
 import models
@@ -15,27 +14,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-class TaskCreated(BaseModel):
-    task: str
-
-
-class Task(BaseModel):
-    id: str
-    task: str
-
-
-class TaskUpdate(BaseModel):
-    task: str
-
-
 app = FastAPI(lifespan=lifespan)
-
-
-tasks = []
-
-
-def find_task_index(task_id: str) -> int | None:
-    return next((i for i, t in enumerate(tasks) if t.get("id") == task_id), None)
+SessionDep = Annotated[Session, Depends(get_session)]
 
 
 TASK_NOT_FOUND_EXCEPTION = HTTPException(
@@ -50,7 +30,7 @@ def root():
 
 
 @app.get("/task")
-def get_tasks(limit: int = 50, offset: int = 0, session: Session = Depends(get_session)):
+def get_tasks(session: SessionDep, limit: int = 50, offset: int = 0):
     tasks_query = session.exec(select(models.Task).offset(offset).limit(limit)).all()
     tasks = [models.TaskPublic.model_validate(task) for task in tasks_query]
     count = session.exec(select(func.count()).select_from(models.Task)).one()
@@ -60,41 +40,47 @@ def get_tasks(limit: int = 50, offset: int = 0, session: Session = Depends(get_s
 
 
 @app.get("/task/{task_id}")
-def get_task(task_id: str):
-    index = find_task_index(task_id)
+def get_task(task_id: str, session: SessionDep):
+    task = session.get(models.Task, task_id)
 
-    if index is not None:
-        return {"ok": True, "task": tasks[index]}
+    if task is not None:
+        return {"ok": True, "task": models.TaskPublic.model_validate(task)}
 
     raise TASK_NOT_FOUND_EXCEPTION
 
 
 @app.post("/task", status_code=status.HTTP_201_CREATED)
-def create_task(item: TaskCreated):
-    uid = uuid.uuid4()
-    new_task = {"id": str(uid), "task": item.task}
-    tasks.append(new_task)
+def create_task(item: models.TaskCreate, session: SessionDep):
+    db_task = models.Task.model_validate(item)
+    session.add(db_task)
+    session.commit()
+    session.refresh(db_task)
 
-    return {"ok": True, "task": new_task}
+    return {"ok": True, "task": models.TaskPublic.model_validate(db_task)}
 
 
 @app.put("/task/{task_id}", status_code=status.HTTP_202_ACCEPTED)
-def update_task(task_id: str, item: TaskUpdate):
-    index = find_task_index(task_id)
+def update_task(task_id: str, item: models.TaskUpdate, session: SessionDep):
+    task = session.get(models.Task, task_id)
 
-    if index is None:
+    if task is None:
         raise TASK_NOT_FOUND_EXCEPTION
 
-    tasks[index] = {"id": task_id, **item.model_dump()}
+    task_data = item.model_dump(exclude_unset=True)
+    task.sqlmodel_update(task_data)
+    session.add(task)
+    session.commit()
+    session.refresh(task)
 
-    return {"ok": True, "task": tasks[index]}
+    return {"ok": True, "task": models.TaskPublic.model_validate(task)}
 
 
 @app.delete("/task/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task(task_id: str):
-    index = find_task_index(task_id)
+def delete_task(task_id: str, session: SessionDep):
+    task = session.get(models.Task, task_id)
 
-    if index is None:
+    if task is None:
         raise TASK_NOT_FOUND_EXCEPTION
 
-    tasks.pop(index)
+    session.delete(task)
+    session.commit()
