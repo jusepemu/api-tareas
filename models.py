@@ -37,7 +37,7 @@ class Task(TaskBase, table=True):
     id: str | None = Field(default_factory=lambda: str(uuid4()), primary_key=True, max_length=36)
     created_at: datetime | None = Field(default_factory=lambda: datetime.now(UTC))
 
-    user_id: str | None = Field(foreign_key="user.id")
+    user_id: str | None = Field(foreign_key="user.id", max_length=36)
 
 
 class TaskCreate(TaskBase):
@@ -80,7 +80,7 @@ class UserPublic(UserBase):
 
 class UserSession(SQLModel, table=True):
     id: str | None = Field(default_factory=lambda: str(uuid4()), primary_key=True, max_length=36)
-    user_id: str = Field(foreign_key="user.id", index=True)
+    user_id: str = Field(foreign_key="user.id", index=True, max_length=36)
     device: str = Field(max_length=255)
     refresh_token_hash: str = Field(max_length=255, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
