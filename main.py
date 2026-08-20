@@ -1,7 +1,14 @@
+import os
+import secrets
 from contextlib import asynccontextmanager
-from typing import Annotated
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, status
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pwdlib import PasswordHash
 from sqlmodel import Session, SQLModel, func, select
 
 import models
@@ -14,22 +21,173 @@ async def lifespan(app: FastAPI):
     yield
 
 
+password_hash = PasswordHash.recommended()
+DUMMY_HASH = password_hash.hash("dummypassword")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+
+
 app = FastAPI(lifespan=lifespan)
 SessionDep = Annotated[Session, Depends(get_session)]
 
 
+# Exceptions
 TASK_NOT_FOUND_EXCEPTION = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND,
     detail="Task not found",
 )
+INVALID_TOKEN_ERROR = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Invalid token",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+INVALID_CREDENTIALS_ERROR = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Invalid credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
 
 
+# Utilities
+def get_password_hash(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return password_hash.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict[str, Any]) -> str:
+    to_encode = data.copy()
+    expires_in = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES") or 30)
+    expire = datetime.now(UTC) + timedelta(minutes=expires_in)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(
+        to_encode, os.getenv("SECRET_KEY"), algorithm=os.getenv("ALGORITHM")
+    )
+    return encoded_jwt
+
+
+def create_refresh_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def hash_refresh_token(refresh_token: str) -> str:
+    return sha256(refresh_token.encode()).hexdigest()
+
+
+def generate_tokens_pair(
+    device: str, user_id: str, session: Session
+) -> dict[str, str]:
+    access_token = create_access_token({"sub": user_id})
+    refresh_token = create_refresh_token()
+    hashed_refresh_token = hash_refresh_token(refresh_token)
+    expires = datetime.now(UTC) + timedelta(
+        days=int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS") or 1)
+    )
+
+    session.add(
+        models.UserSession(
+            refresh_token_hash=hashed_refresh_token,
+            user_id=user_id,
+            expires_at=expires,
+            device=device,
+        )
+    )
+    session.commit()
+
+    return {"access_token": access_token, "refresh_token": refresh_token}
+
+
+def get_active_current_user(
+    token: Annotated[str, Depends(oauth2_scheme)], session: SessionDep
+) -> models.UserPublic:
+    algorithm = os.getenv("ALGORITHM")
+    if not algorithm:
+        raise HTTPException(status_code=500, detail="Server configuration error")
+    try:
+        decode_token = jwt.decode(
+            token, os.getenv("SECRET_KEY"), algorithms=[algorithm]
+        )
+        user_id = decode_token.get("sub")
+        if not user_id:
+            raise jwt.InvalidTokenError()
+        user = session.get(models.User, user_id)
+        if not user:
+            raise jwt.InvalidTokenError()
+        return models.UserPublic.model_validate(user)
+    except jwt.InvalidTokenError:
+        raise INVALID_TOKEN_ERROR
+
+
+# API Routes
 @app.get("/")
 def root():
     return {"ok": True, "message": "Hello World"}
 
 
-@app.get("/task")
+@app.post("/api/v1/auth/token")
+def login(
+    request: Request,
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    response: Response,
+    session: SessionDep,
+):
+    user_query = session.exec(
+        select(models.User).where(models.User.email == form_data.username)
+    ).first()
+    if not user_query:
+        _ = verify_password(form_data.password, DUMMY_HASH)
+        raise INVALID_CREDENTIALS_ERROR
+    if not verify_password(form_data.password, user_query.password_hash):
+        raise INVALID_CREDENTIALS_ERROR
+
+    assert user_query.id is not None, "user is not reachable"
+
+    device = request.headers.get("user-agent", "web")
+    tokens = generate_tokens_pair(
+        device=device[:255], user_id=user_query.id, session=session
+    )
+
+    response.set_cookie(
+        "refresh_token",
+        tokens["refresh_token"],
+        httponly=True,
+        samesite="lax",
+    )
+
+    return {
+        "ok": True,
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+        "token_type": "bearer",
+    }
+
+
+@app.post("/api/v1/auth/register")
+def register(form_data: models.UserCreate, session: SessionDep):
+    hashed_password = get_password_hash(form_data.password)
+    user_query = session.exec(
+        select(models.User).where(models.User.email == form_data.email)
+    ).first()
+    if user_query:
+        raise HTTPException(
+            status_code=409, detail="Problems to register user, verify your credentials"
+        )
+    user = models.User(email=form_data.email, password_hash=hashed_password)
+    session.add(user)
+    session.commit()
+
+    return {"ok": True, "message": "User registered successfully"}
+
+
+@app.get("/api/v1/auth/me")
+def get_current_user(
+    user: Annotated[models.UserPublic, Depends(get_active_current_user)],
+):
+    return {"ok": True, "user": user}
+
+
+@app.get("/api/v1/task")
 def get_tasks(session: SessionDep, limit: int = 50, offset: int = 0):
     tasks_query = session.exec(select(models.Task).offset(offset).limit(limit)).all()
     tasks = [models.TaskPublic.model_validate(task) for task in tasks_query]
@@ -39,7 +197,7 @@ def get_tasks(session: SessionDep, limit: int = 50, offset: int = 0):
     return {"ok": True, "count": count, "results": tasks, "has_more": has_more}
 
 
-@app.get("/task/{task_id}")
+@app.get("/api/v1/task/{task_id}")
 def get_task(task_id: str, session: SessionDep):
     task = session.get(models.Task, task_id)
 
@@ -49,7 +207,7 @@ def get_task(task_id: str, session: SessionDep):
     raise TASK_NOT_FOUND_EXCEPTION
 
 
-@app.post("/task", status_code=status.HTTP_201_CREATED)
+@app.post("/api/v1/task", status_code=status.HTTP_201_CREATED)
 def create_task(item: models.TaskCreate, session: SessionDep):
     db_task = models.Task.model_validate(item)
     session.add(db_task)
@@ -59,7 +217,7 @@ def create_task(item: models.TaskCreate, session: SessionDep):
     return {"ok": True, "task": models.TaskPublic.model_validate(db_task)}
 
 
-@app.put("/task/{task_id}", status_code=status.HTTP_202_ACCEPTED)
+@app.put("/api/v1/task/{task_id}", status_code=status.HTTP_202_ACCEPTED)
 def update_task(task_id: str, item: models.TaskUpdate, session: SessionDep):
     task = session.get(models.Task, task_id)
 
@@ -67,7 +225,7 @@ def update_task(task_id: str, item: models.TaskUpdate, session: SessionDep):
         raise TASK_NOT_FOUND_EXCEPTION
 
     task_data = item.model_dump(exclude_unset=True)
-    task.sqlmodel_update(task_data)
+    _ = task.sqlmodel_update(task_data)
     session.add(task)
     session.commit()
     session.refresh(task)
@@ -75,7 +233,7 @@ def update_task(task_id: str, item: models.TaskUpdate, session: SessionDep):
     return {"ok": True, "task": models.TaskPublic.model_validate(task)}
 
 
-@app.delete("/task/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/api/v1/task/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_task(task_id: str, session: SessionDep):
     task = session.get(models.Task, task_id)
 
