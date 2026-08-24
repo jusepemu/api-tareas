@@ -75,9 +75,25 @@ def hash_refresh_token(refresh_token: str) -> str:
     return sha256(refresh_token.encode()).hexdigest()
 
 
-def generate_tokens_pair(
-    device: str, user_id: str, session: Session
-) -> dict[str, str]:
+def ensure_access_matches_user(access_token: str, user_id: str) -> None:
+    algorithm = os.getenv("ALGORITHM")
+    if not algorithm:
+        raise HTTPException(status_code=500, detail="Server configuration error")
+    try:
+        payload = jwt.decode(
+            access_token,
+            os.getenv("SECRET_KEY"),
+            algorithms=[algorithm],
+            options={"verify_exp": False},
+        )
+        sub = payload.get("sub")
+        if not sub or sub != user_id:
+            raise jwt.InvalidTokenError()
+    except jwt.InvalidTokenError:
+        raise INVALID_TOKEN_ERROR
+
+
+def generate_tokens_pair(device: str, user_id: str, session: Session) -> dict[str, str]:
     access_token = create_access_token({"sub": user_id})
     refresh_token = create_refresh_token()
     hashed_refresh_token = hash_refresh_token(refresh_token)
@@ -185,6 +201,67 @@ def get_current_user(
     user: Annotated[models.UserPublic, Depends(get_active_current_user)],
 ):
     return {"ok": True, "user": user}
+
+
+@app.post("/api/v1/auth/refresh")
+def refresh_token(
+    request: Request, tokens: dict[str, str], response: Response, session: SessionDep
+):
+    refresh_from_cookie = request.cookies.get("refresh_token")
+    refresh_token = (
+        refresh_from_cookie if refresh_from_cookie else tokens.get("refresh_token")
+    )
+    access_token = tokens.get("access_token")
+    device = request.headers.get("user-agent", "web")
+
+    if not refresh_token:
+        raise INVALID_TOKEN_ERROR
+
+    if not access_token:
+        raise INVALID_TOKEN_ERROR
+
+    hashed_token = hash_refresh_token(refresh_token)
+    user_session = session.exec(
+        select(models.UserSession).where(
+            models.UserSession.refresh_token_hash == hashed_token
+        )
+    ).one_or_none()
+
+    if not user_session:
+        raise INVALID_TOKEN_ERROR
+
+    if user_session.revoked_at or user_session.expires_at < datetime.now(UTC):
+        user_session.revoked_at = datetime.now(UTC)
+        session.commit()
+        raise INVALID_TOKEN_ERROR
+
+    ensure_access_matches_user(access_token, user_session.user_id)
+
+    user_session.last_used_at = datetime.now(UTC)
+    user_session.revoked_at = datetime.now(UTC)
+    session.add(user_session)
+    session.commit()
+
+    tokens = generate_tokens_pair(
+        device=device[:255], user_id=user_session.user_id, session=session
+    )
+    response.set_cookie(
+        "refresh_token",
+        tokens["refresh_token"],
+        httponly=True,
+        samesite="lax",
+    )
+
+    return {
+        "ok": True,
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+    }
+
+
+@app.post("/api/v1/auth/logout")
+def logout():
+    pass
 
 
 @app.get("/api/v1/task")
