@@ -75,21 +75,29 @@ def hash_refresh_token(refresh_token: str) -> str:
     return sha256(refresh_token.encode()).hexdigest()
 
 
-def ensure_access_matches_user(access_token: str, user_id: str) -> None:
+def decode_access_token(
+    access_token: str,
+    *,
+    verify_expiration: bool = True,
+) -> dict[str, Any]:
     algorithm = os.getenv("ALGORITHM")
     if not algorithm:
         raise HTTPException(status_code=500, detail="Server configuration error")
     try:
-        payload = jwt.decode(
+        return jwt.decode(
             access_token,
             os.getenv("SECRET_KEY"),
             algorithms=[algorithm],
-            options={"verify_exp": False},
+            options={"verify_exp": verify_expiration},
         )
-        sub = payload.get("sub")
-        if not sub or sub != user_id:
-            raise jwt.InvalidTokenError()
     except jwt.InvalidTokenError:
+        raise INVALID_TOKEN_ERROR
+
+
+def ensure_access_matches_user(access_token: str, user_id: str) -> None:
+    payload = decode_access_token(access_token, verify_expiration=False)
+    sub = payload.get("sub")
+    if not sub or sub != user_id:
         raise INVALID_TOKEN_ERROR
 
 
@@ -117,22 +125,14 @@ def generate_tokens_pair(device: str, user_id: str, session: Session) -> dict[st
 def get_active_current_user(
     token: Annotated[str, Depends(oauth2_scheme)], session: SessionDep
 ) -> models.UserPublic:
-    algorithm = os.getenv("ALGORITHM")
-    if not algorithm:
-        raise HTTPException(status_code=500, detail="Server configuration error")
-    try:
-        decode_token = jwt.decode(
-            token, os.getenv("SECRET_KEY"), algorithms=[algorithm]
-        )
-        user_id = decode_token.get("sub")
-        if not user_id:
-            raise jwt.InvalidTokenError()
-        user = session.get(models.User, user_id)
-        if not user:
-            raise jwt.InvalidTokenError()
-        return models.UserPublic.model_validate(user)
-    except jwt.InvalidTokenError:
+    decode_token = decode_access_token(token)
+    user_id = decode_token.get("sub")
+    if not user_id:
         raise INVALID_TOKEN_ERROR
+    user = session.get(models.User, user_id)
+    if not user:
+        raise INVALID_TOKEN_ERROR
+    return models.UserPublic.model_validate(user)
 
 
 # API Routes
@@ -259,13 +259,55 @@ def refresh_token(
     }
 
 
-@app.post("/api/v1/auth/logout")
-def logout():
-    pass
+@app.post("/api/v1/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    request: Request,
+    access_token: Annotated[str, Depends(oauth2_scheme)],
+    body: dict[str, str],
+    response: Response,
+    session: SessionDep,
+):
+    refresh_token = request.cookies.get("refresh_token") or (
+        body.get("refresh_token") if body else None
+    )
+    payload = decode_access_token(access_token, verify_expiration=False)
+    sub = payload.get("sub")
+
+    if not sub:
+        raise INVALID_TOKEN_ERROR
+
+    if not refresh_token:
+        raise INVALID_TOKEN_ERROR
+
+    hashed = hash_refresh_token(refresh_token)
+    user_session = session.exec(
+        select(models.UserSession).where(
+            models.UserSession.refresh_token_hash == hashed,
+            models.UserSession.user_id == sub,
+        )
+    ).one_or_none()
+
+    if user_session and not user_session.revoked_at:
+        user_session.revoked_at = datetime.now(UTC)
+        user_session.last_used_at = datetime.now(UTC)
+        session.add(user_session)
+        session.commit()
+
+    response.delete_cookie(
+        "refresh_token",
+        path="/",
+        samesite="lax",
+    )
+    response.status_code = 204
 
 
 @app.get("/api/v1/task")
-def get_tasks(session: SessionDep, limit: int = 50, offset: int = 0):
+def get_tasks(
+    session: SessionDep,
+    _: Annotated[models.UserPublic, Depends(get_active_current_user)],
+    limit: int = 50,
+    offset: int = 0,
+):
     tasks_query = session.exec(select(models.Task).offset(offset).limit(limit)).all()
     tasks = [models.TaskPublic.model_validate(task) for task in tasks_query]
     count = session.exec(select(func.count()).select_from(models.Task)).one()
@@ -275,7 +317,11 @@ def get_tasks(session: SessionDep, limit: int = 50, offset: int = 0):
 
 
 @app.get("/api/v1/task/{task_id}")
-def get_task(task_id: str, session: SessionDep):
+def get_task(
+    task_id: str,
+    _: Annotated[models.UserPublic, Depends(get_active_current_user)],
+    session: SessionDep,
+):
     task = session.get(models.Task, task_id)
 
     if task is not None:
@@ -285,8 +331,13 @@ def get_task(task_id: str, session: SessionDep):
 
 
 @app.post("/api/v1/task", status_code=status.HTTP_201_CREATED)
-def create_task(item: models.TaskCreate, session: SessionDep):
+def create_task(
+    item: models.TaskCreate,
+    session: SessionDep,
+    user: Annotated[models.UserPublic, Depends(get_active_current_user)],
+):
     db_task = models.Task.model_validate(item)
+    db_task.user_id = user.id
     session.add(db_task)
     session.commit()
     session.refresh(db_task)
@@ -294,15 +345,24 @@ def create_task(item: models.TaskCreate, session: SessionDep):
     return {"ok": True, "task": models.TaskPublic.model_validate(db_task)}
 
 
-@app.put("/api/v1/task/{task_id}", status_code=status.HTTP_202_ACCEPTED)
-def update_task(task_id: str, item: models.TaskUpdate, session: SessionDep):
-    task = session.get(models.Task, task_id)
+@app.put("/api/v1/task/{task_id}", status_code=status.HTTP_200_OK)
+def update_task(
+    task_id: str,
+    item: models.TaskUpdate,
+    session: SessionDep,
+    user: Annotated[models.UserPublic, Depends(get_active_current_user)],
+):
+    task = session.exec(
+        select(models.Task).where(
+            models.Task.id == task_id,
+            models.Task.user_id == user.id,
+        )
+    ).one_or_none()
 
     if task is None:
         raise TASK_NOT_FOUND_EXCEPTION
 
-    task_data = item.model_dump(exclude_unset=True)
-    _ = task.sqlmodel_update(task_data)
+    task.sqlmodel_update(item.model_dump(exclude_unset=True))
     session.add(task)
     session.commit()
     session.refresh(task)
@@ -311,8 +371,17 @@ def update_task(task_id: str, item: models.TaskUpdate, session: SessionDep):
 
 
 @app.delete("/api/v1/task/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task(task_id: str, session: SessionDep):
-    task = session.get(models.Task, task_id)
+def delete_task(
+    task_id: str,
+    session: SessionDep,
+    user: Annotated[models.UserPublic, Depends(get_active_current_user)],
+):
+    task = session.exec(
+        select(models.Task).where(
+            models.Task.id == task_id,
+            models.Task.user_id == user.id,
+        )
+    ).one_or_none()
 
     if task is None:
         raise TASK_NOT_FOUND_EXCEPTION
