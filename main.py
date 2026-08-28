@@ -48,6 +48,10 @@ INVALID_CREDENTIALS_ERROR = HTTPException(
 
 
 # Utilities
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 def get_password_hash(password: str) -> str:
     return password_hash.hash(password)
 
@@ -59,7 +63,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict[str, Any]) -> str:
     to_encode = data.copy()
     expires_in = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES") or 30)
-    expire = datetime.now(UTC) + timedelta(minutes=expires_in)
+    expire = utc_now() + timedelta(minutes=expires_in)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(
         to_encode, os.getenv("SECRET_KEY"), algorithm=os.getenv("ALGORITHM")
@@ -105,7 +109,7 @@ def generate_tokens_pair(device: str, user_id: str, session: Session) -> dict[st
     access_token = create_access_token({"sub": user_id})
     refresh_token = create_refresh_token()
     hashed_refresh_token = hash_refresh_token(refresh_token)
-    expires = datetime.now(UTC) + timedelta(
+    expires = utc_now() + timedelta(
         days=int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS") or 1)
     )
 
@@ -230,15 +234,15 @@ def refresh_token(
     if not user_session:
         raise INVALID_TOKEN_ERROR
 
-    if user_session.revoked_at or user_session.expires_at < datetime.now(UTC):
-        user_session.revoked_at = datetime.now(UTC)
+    if user_session.revoked_at or user_session.expires_at < utc_now():
+        user_session.revoked_at = utc_now()
         session.commit()
         raise INVALID_TOKEN_ERROR
 
     ensure_access_matches_user(access_token, user_session.user_id)
 
-    user_session.last_used_at = datetime.now(UTC)
-    user_session.revoked_at = datetime.now(UTC)
+    user_session.last_used_at = utc_now()
+    user_session.revoked_at = utc_now()
     session.add(user_session)
     session.commit()
 
@@ -288,8 +292,8 @@ def logout(
     ).one_or_none()
 
     if user_session and not user_session.revoked_at:
-        user_session.revoked_at = datetime.now(UTC)
-        user_session.last_used_at = datetime.now(UTC)
+        user_session.revoked_at = utc_now()
+        user_session.last_used_at = utc_now()
         session.add(user_session)
         session.commit()
 
@@ -304,11 +308,16 @@ def logout(
 @app.get("/api/v1/task")
 def get_tasks(
     session: SessionDep,
-    _: Annotated[models.UserPublic, Depends(get_active_current_user)],
+    user: Annotated[models.UserPublic, Depends(get_active_current_user)],
     limit: int = 50,
     offset: int = 0,
 ):
-    tasks_query = session.exec(select(models.Task).offset(offset).limit(limit)).all()
+    tasks_query = session.exec(
+        select(models.Task)
+        .where(models.Task.user_id == user.id)
+        .offset(offset)
+        .limit(limit)
+    ).all()
     tasks = [models.TaskPublic.model_validate(task) for task in tasks_query]
     count = session.exec(select(func.count()).select_from(models.Task)).one()
     has_more = count > offset + len(tasks)
@@ -319,12 +328,12 @@ def get_tasks(
 @app.get("/api/v1/task/{task_id}")
 def get_task(
     task_id: str,
-    _: Annotated[models.UserPublic, Depends(get_active_current_user)],
+    user: Annotated[models.UserPublic, Depends(get_active_current_user)],
     session: SessionDep,
 ):
     task = session.get(models.Task, task_id)
 
-    if task is not None:
+    if task is not None and task.user_id == user.id:
         return {"ok": True, "task": models.TaskPublic.model_validate(task)}
 
     raise TASK_NOT_FOUND_EXCEPTION
@@ -362,7 +371,7 @@ def update_task(
     if task is None:
         raise TASK_NOT_FOUND_EXCEPTION
 
-    task.sqlmodel_update(item.model_dump(exclude_unset=True))
+    _ = task.sqlmodel_update(item.model_dump(exclude_unset=True))
     session.add(task)
     session.commit()
     session.refresh(task)
