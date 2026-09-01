@@ -1,11 +1,19 @@
 from datetime import UTC, datetime
+from typing import Annotated
 from uuid import uuid4
 
+from pydantic import EmailStr, StringConstraints
 from sqlmodel import Field, SQLModel
 
 
+StrongPassword = Annotated[
+    str,
+    StringConstraints(min_length=8, max_length=255, pattern=r"\S"),
+]
+
+
 class UserBase(SQLModel):
-    email: str = Field(max_length=255)
+    email: EmailStr = Field(min_length=1, max_length=255)
 
 
 class User(UserBase, table=True):
@@ -15,7 +23,7 @@ class User(UserBase, table=True):
 
 
 class UserCreate(UserBase):
-    password: str = Field(min_length=8, max_length=255)
+    password: StrongPassword
 
 
 class UserPublic(UserBase):

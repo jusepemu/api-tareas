@@ -79,3 +79,20 @@ def test_register_returns_422_when_email_is_invalid(client):
     )
 
     assert response.status_code == 422
+
+
+def test_register_returns_422_when_password_is_whitespace_only(client, session):
+    email = "whitespace@example.com"
+    password = "        "
+
+    response = client.post(
+        REGISTER_ENDPOINT,
+        json={"email": email, "password": password},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert any(error["loc"][-1] == "password" for error in detail)
+
+    user = session.exec(select(User).where(User.email == email)).first()
+    assert user is None
