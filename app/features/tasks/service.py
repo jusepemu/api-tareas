@@ -1,4 +1,4 @@
-from sqlmodel import Session, func, select
+from sqlmodel import Session, col, func, select
 
 from app.models import Task, TaskCreate, TaskUpdate
 
@@ -8,11 +8,16 @@ def list_tasks(
 ) -> tuple[list[Task], int]:
     rows = session.exec(
         select(Task)
-        .where(Task.user_id == user_id)
+        .where(col(Task.user_id) == user_id)
+        .order_by(col(Task.created_at), col(Task.id))
         .offset(offset)
         .limit(limit)
     ).all()
-    count = session.exec(select(func.count()).select_from(Task)).one()
+    count = session.exec(
+        select(func.count())
+        .select_from(Task)
+        .where(col(Task.user_id) == user_id)
+    ).one()
     return list(rows), count
 
 

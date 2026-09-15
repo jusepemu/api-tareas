@@ -14,3 +14,6 @@ wheels/
 
 # opencode local session artifacts
 .opencode/
+
+# Local planning/work artifacts
+.temp/

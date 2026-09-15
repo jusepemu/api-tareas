@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.deps import SessionDep, get_active_current_user
 from app.features.tasks import service
@@ -18,8 +18,8 @@ TASK_NOT_FOUND_EXCEPTION = HTTPException(
 def get_tasks(
     session: SessionDep,
     user: Annotated[UserPublic, Depends(get_active_current_user)],
-    limit: int = 50,
-    offset: int = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ):
     tasks_query, count = service.list_tasks(session, user.id, limit, offset)
     tasks = [TaskPublic.model_validate(task) for task in tasks_query]

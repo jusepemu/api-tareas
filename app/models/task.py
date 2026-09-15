@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from uuid import uuid4
 
+from pydantic import field_validator
 from sqlalchemy import Column
 from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, SQLModel
@@ -45,12 +46,19 @@ class TaskCreate(TaskBase):
 
 
 class TaskUpdate(SQLModel):
-    title: str | None = None
-    description: str | None = None
+    title: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=255)
     completed: bool | None = None
     status: StatusEnum | None = None
     start_date: datetime | None = None
     end_date: datetime | None = None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def title_must_not_be_null(cls, value: str | None) -> str:
+        if value is None:
+            raise ValueError("title cannot be null")
+        return value
 
 
 class TaskPublic(TaskBase):
