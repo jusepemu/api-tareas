@@ -100,9 +100,9 @@ def refresh_token(
 def logout(
     request: Request,
     access_token: Annotated[str, Depends(oauth2_scheme)],
-    body: dict[str, str],
     response: Response,
     session: SessionDep,
+    body: dict[str, str] | None = None,
 ):
     refresh_token = request.cookies.get("refresh_token") or (
         body.get("refresh_token") if body else None
