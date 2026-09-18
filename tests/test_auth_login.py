@@ -64,3 +64,41 @@ def test_token_returns_tokens_and_creates_session_when_credentials_are_valid(
     assert stored.refresh_token_hash == hash_refresh_token(refresh_token)
     assert stored.refresh_token_hash != refresh_token
     assert stored.revoked_at is None
+
+
+def test_token_returns_401_when_user_does_not_exist(client, session: Session):
+    # Arrange — DB sin usuarios
+    response = client.post(
+        TOKEN_ENDPOINT,
+        data={"username": "nobody@example.com", "password": PASSWORD},
+    )
+
+    # Assert
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid credentials"}
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert session.exec(select(UserSession)).all() == []
+
+
+def test_token_does_not_reveal_existence_when_credentials_are_invalid(
+    client, session: Session
+):
+    missing_user = client.post(
+        TOKEN_ENDPOINT,
+        data={"username": "nobody@example.com", "password": PASSWORD},
+    )
+
+    client.post(REGISTER_ENDPOINT, json={"email": EMAIL, "password": PASSWORD})
+    wrong_password = client.post(
+        TOKEN_ENDPOINT,
+        data={"username": EMAIL, "password": "wrong-password-123"},
+    )
+
+    # Ambos casos son indistinguibles para el atacante
+    assert missing_user.status_code == wrong_password.status_code == 401
+    assert missing_user.json() == wrong_password.json()
+    assert (
+        missing_user.headers["www-authenticate"]
+        == wrong_password.headers["www-authenticate"]
+    )
+    assert session.exec(select(UserSession)).all() == []
