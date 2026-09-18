@@ -3,36 +3,18 @@ import os
 import jwt
 from sqlmodel import Session, select
 
-from app.features.auth.service import hash_refresh_token
-from app.models import User, UserSession
+from app.models import User
+from tests.helpers import get_session_by_refresh, register_and_login
 
-REGISTER_ENDPOINT = "/api/v1/auth/register"
-TOKEN_ENDPOINT = "/api/v1/auth/token"
 REFRESH_ENDPOINT = "/api/v1/auth/refresh"
 
 EMAIL = "refresh@example.com"
 PASSWORD = "correct-password-123"
 
 
-def register_and_login(client) -> dict:
-    client.post(REGISTER_ENDPOINT, json={"email": EMAIL, "password": PASSWORD})
-    response = client.post(
-        TOKEN_ENDPOINT, data={"username": EMAIL, "password": PASSWORD}
-    )
-    return response.json()
-
-
-def get_session_by_refresh(session: Session, refresh_token: str) -> UserSession | None:
-    return session.exec(
-        select(UserSession).where(
-            UserSession.refresh_token_hash == hash_refresh_token(refresh_token)
-        )
-    ).first()
-
-
 def test_refresh_rotates_session_when_refresh_sent_via_cookie(client, session: Session):
     # Arrange — login deja la cookie en el jar del client
-    login = register_and_login(client)
+    login = register_and_login(client, EMAIL, PASSWORD)
     user = session.exec(select(User).where(User.email == EMAIL)).first()
     assert user is not None
 
@@ -71,7 +53,7 @@ def test_refresh_rotates_session_when_refresh_sent_via_cookie(client, session: S
 
 def test_refresh_rotates_session_when_refresh_sent_via_body(client, session: Session):
     # Arrange — sin cookie: forzamos el else path
-    login = register_and_login(client)
+    login = register_and_login(client, EMAIL, PASSWORD)
     client.cookies.clear()
 
     # Act
@@ -98,7 +80,7 @@ def test_refresh_rotates_session_when_refresh_sent_via_body(client, session: Ses
 
 def test_refresh_returns_401_when_old_refresh_is_reused(client):
     # Arrange
-    login = register_and_login(client)
+    login = register_and_login(client, EMAIL, PASSWORD)
     client.cookies.clear()
 
     first = client.post(
